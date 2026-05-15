@@ -1,0 +1,23 @@
+# Transcript files (will be pushed separately)
+Transcripts/
+
+# Generated subtitle files
+*.en.srt
+*.en.vtt
+*.en.json3
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archive
+_archive/

@@ -12,7 +12,9 @@ mock-based test suite.
 - **Preflight gate** — fails fast with an actionable, per-OS hint if `ffmpeg`/`ffprobe`
   are missing or the output directory is not writable; logs the `yt-dlp` version.
 - **Idempotent resume** — a download archive records completed video IDs, so
-  re-running (or scheduling via your OS) only fetches new videos.
+  re-running (or scheduling via your OS) only fetches new videos. Previously
+  fetched videos are reported as `skipped` (so a re-run with nothing new shows
+  `skipped: N, downloaded: 0`).
 - **Per-video fault isolation** — each video downloads in its own try/except;
   one bad video (private/removed/geo-blocked) never aborts the batch.
 - **Retry with backoff** — transient failures (network/HTTP 5xx/429/throttling)

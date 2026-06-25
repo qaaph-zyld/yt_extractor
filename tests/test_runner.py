@@ -12,13 +12,14 @@ how (transient vs permanent), and assert that:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ytmp3dl.channel import VideoEntry
 from ytmp3dl.config import Config
 from ytmp3dl.errors import PermanentDownloadError, TransientDownloadError
 from ytmp3dl.report import RunReport, Status
-from ytmp3dl.runner import download_with_retries, run_batch
+from ytmp3dl.runner import download_with_retries, load_archived_ids, run_batch
 
 
 def make_videos(*ids: str) -> list[VideoEntry]:
@@ -283,3 +284,118 @@ def test_run_batch_uses_provided_report(tmp_path):
     cfg = Config(output_dir=str(tmp_path / "out"))
     returned = run_batch(make_videos("a"), cfg, report=report, downloader=dl, sleep=sleep)
     assert returned is report
+
+
+# --- archive-aware skipping (M6) -------------------------------------------
+
+
+def _write_archive(cfg: Config, *ids: str) -> None:
+    """Write a yt-dlp download archive at the config's resolved archive path."""
+    path = Path(cfg.archive_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"youtube {vid}\n" for vid in ids), encoding="utf-8")
+
+
+def test_load_archived_ids_parses_and_ignores_garbage(tmp_path):
+    archive = tmp_path / "arch.txt"
+    archive.write_text(
+        "youtube aaa\n"
+        "\n"  # blank line
+        "   \n"  # whitespace-only line
+        "# a comment\n"
+        "youtube bbb\n"
+        "soundcloud ccc\n"  # different extractor; last token is the id
+        "  youtube   ddd  \n"  # stray whitespace
+        "loneid\n",  # single token -> taken as the id
+        encoding="utf-8",
+    )
+    ids = load_archived_ids(str(archive))
+    assert ids == {"aaa", "bbb", "ccc", "ddd", "loneid"}
+
+
+def test_load_archived_ids_missing_file_returns_empty(tmp_path):
+    assert load_archived_ids(str(tmp_path / "nope.txt")) == set()
+
+
+def test_load_archived_ids_none_returns_empty():
+    assert load_archived_ids(None) == set()
+
+
+def test_run_batch_skips_archived_video(tmp_path):
+    sleep = SpySleep()
+    cfg = Config(output_dir=str(tmp_path / "out"))  # archive enabled by default
+    _write_archive(cfg, "a")  # 'a' is already downloaded; 'b' is new
+
+    dl = FakeDownloader({"a": "ok", "b": "ok"})
+    report = run_batch(make_videos("a", "b"), cfg, downloader=dl, sleep=sleep)
+
+    # Archived video is reported SKIPPED and the downloader was never called for it.
+    assert report.results["a"].status is Status.SKIPPED
+    assert "a" not in dl.calls
+    # The new video is downloaded exactly once.
+    assert report.results["b"].status is Status.DOWNLOADED
+    assert dl.calls["b"] == 1
+    # Counts reflect the idempotency promise: skipped: 1, downloaded: 1.
+    assert report.counts() == {"downloaded": 1, "skipped": 1, "failed": 0}
+
+
+def test_run_batch_no_archive_does_not_skip(tmp_path):
+    sleep = SpySleep()
+    # Archiving disabled -> archive_path() is None -> nothing is skipped, even
+    # though an archive file happens to exist on disk at the default location.
+    cfg = Config(output_dir=str(tmp_path / "out"), use_archive=False)
+    out = tmp_path / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / ".ytmp3dl-archive.txt").write_text("youtube a\n", encoding="utf-8")
+
+    dl = FakeDownloader({"a": "ok", "b": "ok"})
+    report = run_batch(make_videos("a", "b"), cfg, downloader=dl, sleep=sleep)
+
+    assert report.results["a"].status is Status.DOWNLOADED
+    assert report.results["b"].status is Status.DOWNLOADED
+    assert dl.calls == {"a": 1, "b": 1}
+    assert report.counts() == {"downloaded": 2, "skipped": 0, "failed": 0}
+
+
+def test_run_batch_all_archived_downloads_nothing(tmp_path):
+    sleep = SpySleep()
+    cfg = Config(output_dir=str(tmp_path / "out"))
+    _write_archive(cfg, "a", "b")
+
+    dl = FakeDownloader({"a": "ok", "b": "ok"})
+    report = run_batch(make_videos("a", "b"), cfg, downloader=dl, sleep=sleep)
+
+    assert dl.calls == {}  # downloader never invoked
+    assert report.counts() == {"downloaded": 0, "skipped": 2, "failed": 0}
+
+
+def test_run_batch_skips_archived_under_concurrency(tmp_path):
+    # Partitioning must apply to the concurrent path too: the pool only sees
+    # the unarchived videos.
+    sleep = SpySleep()
+    cfg = Config(output_dir=str(tmp_path / "out"), concurrency=3)
+    _write_archive(cfg, "a", "c")
+
+    dl = FakeDownloader({"a": "ok", "b": "ok", "c": "ok", "d": "ok"})
+    report = run_batch(make_videos("a", "b", "c", "d"), cfg, downloader=dl, sleep=sleep)
+
+    assert report.results["a"].status is Status.SKIPPED
+    assert report.results["c"].status is Status.SKIPPED
+    assert set(dl.calls) == {"b", "d"}  # only the new ones were downloaded
+    assert report.counts() == {"downloaded": 2, "skipped": 2, "failed": 0}
+
+
+def test_run_batch_unexpected_error_message(tmp_path):
+    # An error that is neither Transient nor Permanent surfaces as "unexpected:".
+    sleep = SpySleep()
+
+    class WeirdDownloader:
+        def __call__(self, video, config, *, archive_path=None):
+            raise RuntimeError("totally unexpected")
+
+    cfg = Config(output_dir=str(tmp_path / "out"), retries=2)
+    report = run_batch(make_videos("a"), cfg, downloader=WeirdDownloader(), sleep=sleep)
+    assert report.results["a"].status is Status.FAILED
+    assert report.results["a"].error.startswith("unexpected:")
+    # No retry/backoff for an unexpected error.
+    assert sleep.delays == []

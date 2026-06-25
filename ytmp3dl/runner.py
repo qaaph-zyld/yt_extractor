@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from ytmp3dl.downloader import download_one
@@ -34,6 +35,38 @@ logger = get_logger()
 
 # Base delay (seconds) for exponential backoff; attempt N waits base * 2**(N-1).
 DEFAULT_BACKOFF_BASE = 2.0
+
+
+def load_archived_ids(archive_path: str | None) -> set[str]:
+    """Read the yt-dlp download archive and return the set of recorded video ids.
+
+    The archive format is one record per line: ``<extractor> <id>`` (e.g.
+    ``youtube dQw4w9WgXcQ``). We take the *last* whitespace-separated token on
+    each non-empty, non-comment line as the id, which is robust to the extractor
+    prefix and tolerant of stray whitespace. A missing or unreadable file (or a
+    disabled archive, ``None``) yields an empty set -- the run then treats every
+    video as new, matching the ``--no-archive`` semantics.
+    """
+    if not archive_path:
+        return set()
+    path = Path(archive_path)
+    if not path.is_file():
+        logger.debug("No download archive at %s (nothing pre-skipped)", path)
+        return set()
+
+    ids: set[str] = set()
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            ids.add(line.split()[-1])
+    except OSError as exc:
+        logger.debug("Could not read download archive %s: %s", path, exc)
+        return set()
+
+    logger.debug("Loaded %d archived id(s) from %s", len(ids), path)
+    return ids
 
 
 class Downloader(Protocol):
@@ -137,10 +170,18 @@ def download_with_retries(
             sleep(delay)
         except Exception as exc:  # noqa: BLE001 - last-resort isolation
             # Should not happen (download_one classifies), but never let an
-            # unexpected error escape and abort the batch.
-            last_error = str(exc)
+            # unexpected error escape and abort the batch. This is distinct from
+            # retry exhaustion, so it gets its own message.
             logger.error("Unexpected error for %s: %s", video.id, exc)
-            break
+            return VideoResult(
+                id=video.id,
+                status=Status.FAILED,
+                title=video.title,
+                upload_date=video.upload_date,
+                duration=video.duration,
+                error=f"unexpected: {exc}",
+                attempts=attempt,
+            )
 
     return VideoResult(
         id=video.id,
@@ -177,6 +218,30 @@ def run_batch(
         report.write_manifest()
         return report
 
+    # Partition out videos already in the download archive: record them as
+    # SKIPPED up front (no downloader call, no retry) so re-runs report
+    # `skipped: N` accurately and the thread pool only ever sees real work.
+    # `download_archive` is also passed to yt-dlp (defense in depth) so even an
+    # id we miss here is still not re-downloaded.
+    archived_ids = load_archived_ids(archive_path)
+    pending: list[VideoEntry] = []
+    for video in videos:
+        if video.id in archived_ids:
+            logger.info("Skipping %s (already in archive)", video.id)
+            report.record(
+                VideoResult(
+                    id=video.id,
+                    status=Status.SKIPPED,
+                    title=video.title,
+                    upload_date=video.upload_date,
+                    duration=video.duration,
+                )
+            )
+        else:
+            pending.append(video)
+    if archived_ids:
+        report.write_manifest()  # persist skips before downloading begins
+
     def _one(video: VideoEntry) -> VideoResult:
         return download_with_retries(
             video,
@@ -187,14 +252,16 @@ def run_batch(
             backoff_base=backoff_base,
         )
 
-    if config.concurrency and config.concurrency > 1:
+    if not pending:
+        logger.info("Nothing new to download (%d skipped).", report.skipped)
+    elif config.concurrency and config.concurrency > 1:
         logger.info(
             "Downloading %d video(s) with concurrency=%d",
-            len(videos),
+            len(pending),
             config.concurrency,
         )
         with ThreadPoolExecutor(max_workers=config.concurrency) as pool:
-            futures = {pool.submit(_one, v): v for v in videos}
+            futures = {pool.submit(_one, v): v for v in pending}
             for future in as_completed(futures):
                 video = futures[future]
                 try:
@@ -210,8 +277,8 @@ def run_batch(
                 report.record(result)
                 report.write_manifest()
     else:
-        logger.info("Downloading %d video(s) sequentially", len(videos))
-        for video in videos:
+        logger.info("Downloading %d video(s) sequentially", len(pending))
+        for video in pending:
             result = _one(video)
             report.record(result)
             report.write_manifest()  # incremental: survive interruption
@@ -225,5 +292,6 @@ __all__ = [
     "DEFAULT_BACKOFF_BASE",
     "Downloader",
     "download_with_retries",
+    "load_archived_ids",
     "run_batch",
 ]

@@ -21,3 +21,16 @@ Thumbs.db
 
 # Archive
 _archive/
+
+# ytmp3dl
+downloads/
+.venv/
+manifest.json
+failures.json
+*.log
+.ytmp3dl-archive.txt
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/

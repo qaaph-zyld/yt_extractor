@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ytmp3dl"
+version = "0.1.0"
+description = "Dependably download MP3 audio for every video on a YouTube channel."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "ytmp3dl contributors" }]
+keywords = ["youtube", "yt-dlp", "mp3", "audio", "downloader"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Environment :: Console",
+]
+
+# Runtime dependency floor pinned to the version verified in development
+# (yt-dlp 2026.06.09). yt-dlp ships frequently; a recent floor keeps the
+# extractor working against YouTube changes while allowing forward upgrades.
+dependencies = [
+    "yt-dlp>=2026.6.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+ytmp3dl = "ytmp3dl.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/ytmp3dl"
+
+[tool.setuptools.packages.find]
+include = ["ytmp3dl*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+# Pre-existing, unrelated script that is intentionally left untouched by this
+# project; it is not part of the ytmp3dl package and is excluded from linting.
+extend-exclude = ["extract_transcripts.py"]
+
+[tool.ruff.lint]
+# BLE001 is enabled so the deliberate broad `except Exception` blocks that
+# provide fault isolation must carry an explicit `# noqa: BLE001` documenting
+# the intent -- they are load-bearing, not accidental.
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "PL", "RUF", "BLE"]
+ignore = [
+    "PLR0913",  # many args: CLI/option assembly legitimately needs them
+    "PLR2004",  # magic values: fine in tests and small literals
+    "PLR0912",  # too many branches: the retry/classify loops are inherently branchy
+    "PLR0915",  # too many statements
+    "C901",     # complexity: ditto
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The argparse declarations in cli.py read best as one line-per-argument; the
+# inline help strings push a few past the limit. Keeping them on one line is
+# more scannable than artificially wrapping every help= string.
+"ytmp3dl/cli.py" = ["E501"]
+"tests/*" = ["PLR2004", "S101", "PLC0415"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "live: tests that hit the real network/YouTube (skipped unless YTMP3DL_LIVE=1).",
+]
